@@ -1,4 +1,3 @@
-# import asyncio
 import asyncio
 import os
 import sys
@@ -6,26 +5,17 @@ import time
 import platform
 import traceback
 from pathlib import Path
-from rich.traceback import install
+
+# 先初始化基础工具
 from colorama import init, Fore
-from dotenv import load_dotenv  # 处理.env文件
+from dotenv import load_dotenv
+from rich.traceback import install
 
-# maim_message imports for console input
-
-# 最早期初始化日志系统，确保所有后续模块都使用正确的日志格式
+# 然后初始化日志系统（确保所有后续模块使用正确日志格式）
 from src.common.logger import initialize_logging, get_logger, shutdown_logging
 
-# UI日志适配器
+# 初始化日志系统
 initialize_logging()
-
-from src.main import MainSystem  # noqa
-from src import BaseMain  # noqa
-from src.manager.async_task_manager import async_task_manager  # noqa
-from src.chat.knowledge.knowledge_lib import initialize_lpmm_knowledge # noqa
-from src.config.config import global_config  # noqa
-from src.common.database.database import initialize_sql_database  # noqa
-from src.common.database.sqlalchemy_models import initialize_database as init_db  # noqa
-
 logger = get_logger("main")
 
 install(extra_lines=3)
@@ -38,29 +28,18 @@ logger.info(f"已设置工作目录为: {script_dir}")
 # 检查并创建.env文件
 def ensure_env_file():
     """确保.env文件存在，如果不存在则从模板创建"""
-    # 定义.env文件的路径
     env_file = Path(".env")
-    # 定义模板文件的路径
     template_env = Path("template/template.env")
     
-    # 检查.env文件是否存在
     if not env_file.exists():
-        # 检查模板文件是否存在
         if template_env.exists():
-            # 记录日志：未找到.env文件，正在从模板创建
             logger.info("未找到.env文件，正在从模板创建...")
-            # 导入shutil模块用于文件复制
             import shutil
-            # 复制模板文件到.env文件
             shutil.copy(template_env, env_file)
-            # 记录日志：已从template/template.env创建.env文件
             logger.info("已从template/template.env创建.env文件")
-            # 记录日志：提示用户编辑.env文件
             logger.warning("请编辑.env文件，将EULA_CONFIRMED设置为true并配置其他必要参数")
         else:
-            # 记录日志：未找到.env文件和template.env模板文件
             logger.error("未找到.env文件和template.env模板文件")
-            # 退出程序
             sys.exit(1)
 
 # 确保环境文件存在
@@ -70,7 +49,6 @@ ensure_env_file()
 load_dotenv()
 
 confirm_logger = get_logger("confirm")
-# 获取没有加载env时的环境变量
 
 uvicorn_server = None
 driver = None
@@ -108,27 +86,29 @@ async def graceful_shutdown():
     """优雅关闭程序 - 增强版本"""
     try:
         logger.info("正在优雅关闭麦麦...")
-        
-        # 记录开始关闭时间
         start_time = time.time()
         
         # 停止所有异步任务
+        from src.manager.async_task_manager import async_task_manager
         await async_task_manager.stop_and_wait_all_tasks()
 
         # 获取所有剩余任务，排除当前任务
-        remaining_tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        remaining_tasks = [t for t in asyncio.all_tasks() 
+                          if t is not asyncio.current_task() and not t.done()]
 
         if remaining_tasks:
             logger.info(f"正在取消 {len(remaining_tasks)} 个剩余任务...")
-
+            
             # 取消所有剩余任务
             for task in remaining_tasks:
-                if not task.done():
-                    task.cancel()
+                task.cancel()
 
             # 等待所有任务完成，设置超时
             try:
-                await asyncio.wait_for(asyncio.gather(*remaining_tasks, return_exceptions=True), timeout=15.0)
+                await asyncio.wait_for(
+                    asyncio.gather(*remaining_tasks, return_exceptions=True), 
+                    timeout=10.0
+                )
                 logger.info("所有剩余任务已成功取消")
             except asyncio.TimeoutError:
                 logger.warning("等待任务取消超时，强制继续关闭")
@@ -141,12 +121,6 @@ async def graceful_shutdown():
 
     except Exception as e:
         logger.error(f"麦麦关闭失败: {e}", exc_info=True)
-    finally:
-        # 确保日志系统关闭
-        try:
-            shutdown_logging()
-        except Exception as e:
-            print(f"关闭日志系统时出错: {e}")
 
 
 def check_eula():
@@ -189,17 +163,22 @@ def check_eula():
 def validate_configuration():
     """验证关键配置"""
     try:
-        # 基础配置验证
-        if not hasattr(global_config, 'database'):
-            logger.error("配置中缺少database配置")
-            return False
-            
+        # 导入全局配置
+        from src.config.config import global_config
+        
+        # 检查必要的配置节
+        required_sections = ['database', 'bot']
+        for section in required_sections:
+            if not hasattr(global_config, section):
+                logger.error(f"配置中缺少{section}配置节")
+                return False
+        
         # 验证数据库配置
         db_config = global_config.database
-        required_fields = ['database_type', 'host']
+        required_db_fields = ['database_type']
         
-        for field in required_fields:
-            if not getattr(db_config, field, None):
+        for field in required_db_fields:
+            if not hasattr(db_config, field) or not getattr(db_config, field):
                 logger.error(f"数据库配置缺少必要字段: {field}")
                 return False
         
@@ -209,23 +188,30 @@ def validate_configuration():
             logger.error(f"不支持的数据库类型: {db_config.database_type}")
             return False
             
+        # 验证bot配置
+        bot_config = global_config.bot
+        if not hasattr(bot_config, 'nickname') or not bot_config.nickname:
+            logger.warning("bot配置缺少nickname字段，将使用默认名称")
+            
         logger.info("配置验证通过")
         return True
         
+    except ImportError:
+        logger.error("无法导入全局配置模块")
+        return False
     except Exception as e:
         logger.error(f"配置验证失败: {e}")
         return False
 
 
-class MaiBotMain(BaseMain):
+class MaiBotMain:
     """麦麦机器人主程序类"""
 
     def __init__(self):
         """
         初始化方法，用于创建类的实例时执行
-        继承父类的初始化方法，并初始化实例属性
+        初始化实例
         """
-        super().__init__()  # 调用父类的初始化方法
         self.main_system = None  # 初始化主系统属性为None
 
     def setup_timezone(self):
@@ -250,6 +236,8 @@ class MaiBotMain(BaseMain):
         logger.info("正在初始化数据库连接...")
         try:
             start_time = time.time()
+            from src.common.database.database import initialize_sql_database
+            from src.config.config import global_config
             initialize_sql_database(global_config.database)
             elapsed_time = time.time() - start_time
             logger.info(f"数据库连接初始化成功，使用 {global_config.database.database_type} 数据库，耗时: {elapsed_time:.2f}秒")
@@ -262,6 +250,7 @@ class MaiBotMain(BaseMain):
         logger.info("正在初始化数据库表结构...")
         try:
             start_time = time.time()
+            from src.common.database.sqlalchemy_models import initialize_database as init_db
             await init_db()
             elapsed_time = time.time() - start_time
             logger.info(f"数据库表结构初始化完成，耗时: {elapsed_time:.2f}秒")
@@ -270,9 +259,11 @@ class MaiBotMain(BaseMain):
             raise e
 
     def create_main_system(self):
-        """创建MainSystem实例"""  # 这是一个多行注释，用于描述函数的功能
-        self.main_system = MainSystem()  # 创建MainSystem类的实例并赋值给self.main_system
-        return self.main_system  # 返回创建的MainSystem实例
+        """创建MainSystem实例"""
+        # 延迟导入以避免循环导入问题
+        from src.main import MainSystem
+        self.main_system = MainSystem()
+        return self.main_system
 
     def run(self):
         """运行主程序"""
@@ -290,49 +281,42 @@ class MaiBotMain(BaseMain):
 
 if __name__ == "__main__":
     exit_code = 0  # 用于记录程序最终的退出状态
+    loop = None
+    
     try:
-        # 创建MaiBotMain实例并获取MainSystem
-        maibot = MaiBotMain()
-        main_system = maibot.run()
-
         # 创建事件循环
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-
-        try:
-            # 异步初始化数据库表结构
-            loop.run_until_complete(maibot.initialize_database_async())
-            
-            # 执行初始化和任务调度
-            loop.run_until_complete(main_system.initialize())
-            initialize_lpmm_knowledge()
-            
-            # 显示彩蛋
-            easter_egg()
-            
-            # Schedule tasks returns a future that runs forever.
-            # We can run console_input_loop concurrently.
-            main_tasks = loop.create_task(main_system.schedule_tasks())
-            logger.info("麦麦机器人启动完成，开始运行主任务...")
-            loop.run_until_complete(main_tasks)
-
-        except KeyboardInterrupt:
-            logger.warning("收到中断信号，正在优雅关闭...")
-        except Exception as e:
-            logger.error(f"主任务执行异常: {e}")
-            raise
-
+        
+        # 创建MaiBotMain实例
+        maibot = MaiBotMain()
+        
+        # 同步初始化步骤
+        main_system = maibot.run()
+        
+        # 异步初始化步骤
+        loop.run_until_complete(maibot.initialize_database_async())
+        loop.run_until_complete(main_system.initialize())
+        
+        # 其他初始化
+        from src.chat.knowledge.knowledge_lib import initialize_lpmm_knowledge
+        initialize_lpmm_knowledge()
+        easter_egg()
+        
+        # 运行主任务
+        main_tasks = loop.create_task(main_system.schedule_tasks())
+        logger.info("麦麦机器人启动完成，开始运行主任务...")
+        loop.run_until_complete(main_tasks)
+        
     except KeyboardInterrupt:
-        logger.info("程序启动过程中被用户中断")
-        exit_code = 130
+        logger.warning("收到中断信号，正在优雅关闭...")
     except Exception as e:
         logger.error(f"主程序发生异常: {str(e)}")
         logger.debug(f"异常详情: {traceback.format_exc()}")
-        exit_code = 1  # 标记发生错误
+        exit_code = 1
     finally:
-        # 确保 loop 在任何情况下都尝试关闭（如果存在且未关闭）
-        if "loop" in locals() and loop and not loop.is_closed():
-            logger.info("开始执行最终关闭流程...")
+        # 确保正确关闭
+        if loop and not loop.is_closed():
             try:
                 loop.run_until_complete(graceful_shutdown())
             except Exception as ge:
@@ -340,13 +324,13 @@ if __name__ == "__main__":
             finally:
                 loop.close()
                 logger.info("事件循环已关闭")
-        else:
-            # 如果没有事件循环，仍然尝试关闭日志系统
-            try:
-                shutdown_logging()
-            except Exception as e:
-                print(f"关闭日志系统时出错: {e}")
-
+        
+        # 关闭日志系统
+        try:
+            shutdown_logging()
+        except Exception as e:
+            print(f"关闭日志系统时出错: {e}")
+        
         # 在程序退出前暂停，让你有机会看到输出
         if exit_code != 0 or os.getenv('ENVIRONMENT') != 'production':
             try:
@@ -354,4 +338,4 @@ if __name__ == "__main__":
             except (KeyboardInterrupt, EOFError):
                 pass  # 忽略中断错误
 
-        sys.exit(exit_code)  # <--- 使用记录的退出码
+        sys.exit(exit_code)
