@@ -1,40 +1,80 @@
 # 再用这个就写一行注释来混提交的我直接全部🌿飞😡
+# 主系统入口文件 - 负责初始化和管理聊天机器人的所有核心组件
 import asyncio
 import signal
 import sys
-import time
-import traceback
-from functools import partial
-from typing import Any
 
-from maim_message import MessageServer
-from rich.traceback import install
-
-from src.chat.emoji_system.emoji_manager import get_emoji_manager
-
-# 导入增强记忆系统管理器
-from src.chat.memory_system.memory_manager import memory_manager
-from src.chat.message_receive.bot import chat_bot
+@@ -13,7 +14,7 @@ from src.chat.message_receive.bot import chat_bot
 from src.chat.message_receive.chat_stream import get_chat_manager
 from src.chat.utils.statistic import OnlineTimeRecordTask, StatisticOutputTask
 from src.common.logger import get_logger
-
 # 导入消息API和traceback模块
+# 消息API和全局服务器管理
 from src.common.message import get_global_api
 from src.common.remote import TelemetryHeartBeatTask
-from src.common.server import Server, get_global_server
-from src.config.config import global_config
-from src.individuality.individuality import Individuality, get_individuality
-from src.manager.async_task_manager import async_task_manager
-from src.mood.mood_manager import mood_manager
+from src.common.server import get_global_server, Server
+
+@@ -24,17 +25,17 @@ from src.mood.mood_manager import mood_manager
 from src.plugin_system.base.component_types import EventType
 from src.plugin_system.core.event_manager import event_manager
-
-# from src.api.main import start_api_server
-# 导入新的插件管理器
+from src.plugin_system.core.plugin_hot_reload import hot_reload_manager
+# 导入新的插件管理器和热重载管理器
+# 插件系统管理
 from src.plugin_system.core.plugin_manager import plugin_manager
 from src.schedule.monthly_plan_manager import monthly_plan_manager
 from src.schedule.schedule_manager import schedule_manager
+
+# from src.api.main import start_api_server
+
+# 如果禁用了记忆功能，使用模拟的记忆管理器
+if not global_config.memory.enable_memory:
+    import src.chat.memory_system.Hippocampus as hippocampus_module
+
+    class MockHippocampusManager:
+        """模拟的记忆管理器，当记忆功能被禁用时使用"""
+        def initialize(self):
+            pass
+
+
+@@ -57,17 +58,17 @@ if not global_config.memory.enable_memory:
+        @staticmethod
+        async def get_memory_from_text(
+                text: str,
+            max_memory_num: int = 3,
+            max_memory_length: int = 2,
+            max_depth: int = 3,
+            fast_retrieval: bool = False,
+        ) -> list:
+                max_memory_num: int = 3,
+                max_memory_length: int = 2,
+                max_depth: int = 3,
+                fast_retrieval: bool = False,
+            ) -> list[str]:
+            return []
+
+        @staticmethod
+        async def get_memory_from_topic(
+                valid_keywords: list[str], max_memory_num: int = 3, max_memory_length: int = 2, max_depth: int = 3
+        ) -> list:
+        ) -> list[str]:
+            return []
+
+        @staticmethod
+
+@@ -77,17 +78,16 @@ if not global_config.memory.enable_memory:
+            return 0.0, []
+
+        @staticmethod
+        def get_memory_from_keyword(keyword: str, max_depth: int = 2) -> list:
+        def get_memory_from_keyword(keyword: str, max_depth: int = 2) -> list[str]:
+            return []
+
+        @staticmethod
+        def get_all_node_names() -> list:
+        def get_all_node_names() -> list[str]:
+            return []
+
+    hippocampus_module.hippocampus_manager = MockHippocampusManager()
 
 # 插件系统现在使用统一的插件加载器
 
@@ -43,217 +83,79 @@ install(extra_lines=3)
 logger = get_logger("main")
 
 
-def _task_done_callback(task: asyncio.Task, message_id: str, start_time: float):
-    """后台任务完成时的回调函数"""
-    end_time = time.time()
-    duration = end_time - start_time
-    try:
-        task.result()  # 如果任务有异常，这里会重新抛出
-        logger.debug(f"消息 {message_id} 的后台任务 (ID: {id(task)}) 已成功完成, 耗时: {duration:.2f}s")
-    except asyncio.CancelledError:
-        logger.warning(f"消息 {message_id} 的后台任务 (ID: {id(task)}) 被取消, 耗时: {duration:.2f}s")
-    except Exception:
-        logger.error(f"处理消息 {message_id} 的后台任务 (ID: {id(task)}) 出现未捕获的异常, 耗时: {duration:.2f}s:")
-        logger.error(traceback.format_exc())
-
-
-class MainSystem:
-    def __init__(self):
-        # 使用增强记忆系统
-        self.memory_manager = memory_manager
-
-        self.individuality: Individuality = get_individuality()
-
-        # 使用消息API替代直接的FastAPI实例
-        self.app: MessageServer = get_global_api()
-        self.server: Server = get_global_server()
-
-        # 设置信号处理器用于优雅退出
-        self._setup_signal_handlers()
-
-    def _setup_signal_handlers(self):
-        """设置信号处理器"""
-
-        def signal_handler(signum, frame):
-            logger.info("收到退出信号，正在优雅关闭系统...")
-
-            import asyncio
-
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # 如果事件循环正在运行，创建任务并设置回调
-                    async def cleanup_and_exit():
-                        await self._async_cleanup()
-                        sys.exit(0)
-
-                    task = asyncio.create_task(cleanup_and_exit())
-                    # 添加任务完成回调，确保程序退出
-                    task.add_done_callback(lambda t: None)
-                else:
-                    # 如果事件循环未运行，使用同步清理
-                    self._cleanup()
-                    sys.exit(0)
-            except Exception as e:
-                logger.error(f"信号处理失败: {e}")
-                sys.exit(1)
-
+@@ -117,23 +117,29 @@ class MainSystem:
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
 
-    async def _initialize_interest_calculator(self):
-        """初始化兴趣值计算组件 - 通过插件系统自动发现和加载"""
-        try:
-            logger.info("开始自动发现兴趣值计算组件...")
-
-            # 使用组件注册表自动发现兴趣计算器组件
-            interest_calculators = {}
-            try:
-                from src.plugin_system.apis.component_manage_api import get_components_info_by_type
-                from src.plugin_system.base.component_types import ComponentType
-                interest_calculators = get_components_info_by_type(ComponentType.INTEREST_CALCULATOR)
-                logger.info(f"通过组件注册表发现 {len(interest_calculators)} 个兴趣计算器组件")
-            except Exception as e:
-                logger.error(f"从组件注册表获取兴趣计算器失败: {e}")
-
-            if not interest_calculators:
-                logger.warning("未发现任何兴趣计算器组件")
-                return
-
-            logger.info("发现的兴趣计算器组件:")
-            for calc_name, calc_info in interest_calculators.items():
-                enabled = getattr(calc_info, "enabled", True)
-                default_enabled = getattr(calc_info, "enabled_by_default", True)
-                logger.info(f"  - {calc_name}: 启用: {enabled}, 默认启用: {default_enabled}")
-
-            # 初始化兴趣度管理器
-            from src.chat.interest_system.interest_manager import get_interest_manager
-            interest_manager = get_interest_manager()
-            await interest_manager.initialize()
-
-            # 尝试注册计算器（单例模式，只注册第一个可用的）
-            registered_calculator = None
-
-            # 使用组件注册表获取组件类并注册
-            for calc_name, calc_info in interest_calculators.items():
-                enabled = getattr(calc_info, "enabled", True)
-                default_enabled = getattr(calc_info, "enabled_by_default", True)
-
-                if not enabled or not default_enabled:
-                    logger.info(f"兴趣计算器 {calc_name} 未启用，跳过")
-                    continue
-
-                try:
-                    from src.plugin_system.core.component_registry import component_registry
-                    component_class = component_registry.get_component_class(calc_name, ComponentType.INTEREST_CALCULATOR)
-
-                    if component_class:
-                        logger.info(f"成功获取 {calc_name} 的组件类: {component_class.__name__}")
-
-                        # 创建组件实例
-                        calculator_instance = component_class()
-                        logger.info(f"成功创建兴趣计算器实例: {calc_name}")
-
-                        # 初始化组件
-                        if await calculator_instance.initialize():
-                            # 注册到兴趣管理器
-                            success = await interest_manager.register_calculator(calculator_instance)
-                            if success:
-                                registered_calculator = calculator_instance
-                                logger.info(f"成功注册兴趣计算器: {calc_name}")
-                                break  # 只注册一个成功的计算器
-                            else:
-                                logger.error(f"兴趣计算器 {calc_name} 注册失败")
-                        else:
-                            logger.error(f"兴趣计算器 {calc_name} 初始化失败")
-                    else:
-                        logger.warning(f"无法找到 {calc_name} 的组件类")
-
-                except Exception as e:
-                    logger.error(f"处理兴趣计算器 {calc_name} 时出错: {e}", exc_info=True)
-
-            if registered_calculator:
-                logger.info(f"当前活跃的兴趣度计算器: {registered_calculator.component_name} v{registered_calculator.component_version}")
-            else:
-                logger.error("未能成功注册任何兴趣计算器")
-
-        except Exception as e:
-            logger.error(f"初始化兴趣度计算器失败: {e}", exc_info=True)
-
-    async def _async_cleanup(self):
-        """异步清理资源"""
-        try:
-
-            # 停止数据库服务
-            try:
-                from src.common.database.database import stop_database
-                await stop_database()
-                logger.info("🛑 数据库服务已停止")
-            except Exception as e:
-                logger.error(f"停止数据库服务时出错: {e}")
-
-            # 停止消息管理器
-            try:
-                from src.chat.message_manager import message_manager
-                await message_manager.stop()
-                logger.info("🛑 消息管理器已停止")
-            except Exception as e:
-                logger.error(f"停止消息管理器时出错: {e}")
-
-            # 停止消息重组器
-            try:
-                from src.plugin_system import EventType
-                from src.plugin_system.core.event_manager import event_manager
-                from src.utils.message_chunker import reassembler
-
-                await event_manager.trigger_event(EventType.ON_STOP, permission_group="SYSTEM")
-                await reassembler.stop_cleanup_task()
-                logger.info("🛑 消息重组器已停止")
-            except Exception as e:
-                logger.error(f"停止消息重组器时出错: {e}")
-
-            # 停止增强记忆系统
-            try:
-                if global_config.memory.enable_memory:
-                    await self.memory_manager.shutdown()
-                    logger.info("🛑 增强记忆系统已停止")
-            except Exception as e:
-                logger.error(f"停止增强记忆系统时出错: {e}")
-
-        except Exception as e:
-            logger.error(f"异步清理资源时出错: {e}")
-
+    @staticmethod
+    def _cleanup():
     def _cleanup(self):
-        """同步清理资源（向后兼容）"""
-        import asyncio
-
+        """清理资源"""
         try:
+            # 停止消息重组器
+            from src.plugin_system.core.event_manager import event_manager
+            from src.plugin_system import EventType
+            # 触发停止事件
+            import asyncio
+            asyncio.run(event_manager.trigger_event(EventType.ON_STOP,permission_group="SYSTEM"))
+            from src.utils.message_chunker import reassembler
+            asyncio.run(event_manager.trigger_event(EventType.ON_STOP, permission_group="SYSTEM"))
+        except Exception as e:
+            logger.error(f"触发停止事件时出错: {e}")
+
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                # 如果循环正在运行，创建异步清理任务
-                asyncio.create_task(self._async_cleanup())
+                asyncio.create_task(reassembler.stop_cleanup_task())
             else:
-                # 如果循环未运行，直接运行异步清理
-                loop.run_until_complete(self._async_cleanup())
-        except Exception as e:
-            logger.error(f"同步清理资源时出错: {e}")
-
-    async def _message_process_wrapper(self, message_data: dict[str, Any]):
-        """并行处理消息的包装器"""
+                loop.run_until_complete(reassembler.stop_cleanup_task())
+            logger.info("🛑 消息重组器已停止")
         try:
-            start_time = time.time()
-            message_id = message_data.get("message_info", {}).get("message_id", "UNKNOWN")
-            # 创建后台任务
-            task = asyncio.create_task(chat_bot.message_process(message_data))
-            logger.debug(f"已为消息 {message_id} 创建后台处理任务 (ID: {id(task)})")
-            # 添加一个回调函数，当任务完成时，它会被调用
-            task.add_done_callback(partial(_task_done_callback, message_id=message_id, start_time=start_time))
-        except Exception:
-            logger.error("在创建消息处理任务时发生严重错误:")
-            logger.error(traceback.format_exc())
+            # 停止消息重组器
+            from src.utils.message_chunker import reassembler
+            
+            # 检查事件循环状态
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.create_task(reassembler.stop_cleanup_task())
+                else:
+                    loop.run_until_complete(reassembler.stop_cleanup_task())
+                logger.info("🛑 消息重组器已停止")
+            except RuntimeError as e:
+                logger.warning(f"事件循环不可用: {e}")
+        except Exception as e:
+            logger.error(f"停止消息重组器时出错: {e}")
+
+
+@@ -150,27 +156,35 @@ class MainSystem:
+                from src.chat.memory_system.async_memory_optimizer import async_memory_manager
+                import asyncio
+
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.create_task(async_memory_manager.shutdown())
+                else:
+                    loop.run_until_complete(async_memory_manager.shutdown())
+                logger.info("🛑 记忆管理器已停止")
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(async_memory_manager.shutdown())
+                    else:
+                        loop.run_until_complete(async_memory_manager.shutdown())
+                    logger.info("🛑 记忆管理器已停止")
+                except RuntimeError as e:
+                    logger.warning(f"事件循环不可用: {e}")
+        except Exception as e:
+            logger.error(f"停止记忆管理器时出错: {e}")
 
     async def initialize(self):
         """初始化系统组件"""
+        # 检查必要的配置
+        if not hasattr(global_config, 'bot') or not hasattr(global_config.bot, 'nickname'):
+            logger.error("缺少必要的bot配置")
+            raise ValueError("Bot配置不完整")
+            
         logger.info(f"正在唤醒{global_config.bot.nickname}......")
 
         # 其他初始化任务
@@ -261,62 +163,28 @@ class MainSystem:
         phrases = [
             ("我们的代码里真的没有bug，只有‘特性’.", 10),
             ("你知道吗？阿范喜欢被切成臊子😡", 10),  # 你加的提示出语法问题来了😡😡😡😡😡😡😡
+            ("我们的代码里真的没有bug，只有‘特性'.", 10),
+            ("你知道吗？阿范喜欢被切成臊子😡", 10),  # 修复了语法错误
             ("你知道吗,雅诺狐的耳朵其实很好摸", 5),
             ("你群最高技术力————言柒姐姐！", 20),
             ("初墨小姐宇宙第一(不是)", 10),  # 15
+            ("初墨小姐宇宙第一(不是)", 10),
             ("world.execute(me);", 10),
             ("正在尝试连接到MaiBot的服务器...连接失败...，正在转接到maimaiDX", 10),
             ("你的bug就像星星一样多，而我的代码像太阳一样，一出来就看不见了。", 10),
-            ("温馨提示：请不要在代码中留下任何魔法数字，除非你知道它的含义。", 10),
-            ("世界上只有10种人：懂二进制的和不懂的。", 10),
-            ("喵喵~你的麦麦被猫娘入侵了喵~", 15),
-            ("恭喜你触发了稀有彩蛋喵：诺狐嗷呜~ ~", 1),
-            ("恭喜你！！！你的开发者模式已成功开启，快来加入我们吧！(๑•̀ㅂ•́)و✧   (小声bb:其实是当黑奴)", 10),
-        ]
+
+@@ -183,7 +197,7 @@ class MainSystem:
         from random import choices
 
         # 分离彩蛋和权重
         egg_texts, weights = zip(*phrases, strict=True)
+        egg_texts, weights = zip(*phrases)
 
         # 使用choices进行带权重的随机选择
         selected_egg = choices(egg_texts, weights=weights, k=1)
-        eggs = selected_egg[0]
-        logger.info(f"""
-全部系统初始化完成，{global_config.bot.nickname}已成功唤醒
-=========================================================
-MoFox_Bot(第三方修改版)
-全部组件已成功启动!
-=========================================================
-🌐 项目地址: https://github.com/MoFox-Studio/MoFox_Bot
-🏠 官方项目: https://github.com/MaiM-with-u/MaiBot
-=========================================================
-这是基于原版MMC的社区改版，包含增强功能和优化(同时也有更多的'特性')
-=========================================================
-小贴士:{eggs}
-""")
 
-    async def _init_components(self):
-        """初始化其他组件"""
-        init_start_time = time.time()
 
-        # 添加在线时间统计任务
-        await async_task_manager.add_task(OnlineTimeRecordTask())
-
-        # 添加统计信息输出任务
-        await async_task_manager.add_task(StatisticOutputTask())
-
-        # 添加遥测心跳任务
-        await async_task_manager.add_task(TelemetryHeartBeatTask())
-
-        # 注册默认事件
-        event_manager.init_default_events()
-
-        # 初始化权限管理器
-        from src.plugin_system.apis.permission_api import permission_api
-        from src.plugin_system.core.permission_manager import PermissionManager
-
-        permission_manager = PermissionManager()
-        await permission_manager.initialize()
+@@ -227,10 +241,6 @@ MoFox_Bot(第三方修改版)
         permission_api.set_permission_manager(permission_manager)
         logger.info("权限管理器初始化成功")
 
@@ -324,71 +192,53 @@ MoFox_Bot(第三方修改版)
         # start_api_server()
         # logger.info("API服务器启动成功")
 
-        # 注册API路由
-        try:
-            from src.api.message_router import router as message_router
-            self.server.register_router(message_router, prefix="/api")
-            logger.info("API路由注册成功")
-        except ImportError as e:
-            logger.error(f"导入API路由失败: {e}")
-        except Exception as e:
-            logger.error(f"注册API路由时发生错误: {e}")
-
         # 加载所有actions，包括默认的和插件的
         plugin_manager.load_all_plugins()
 
-        # 处理所有缓存的事件订阅（插件加载完成后）
-        event_manager.process_all_pending_subscriptions()
 
-        # 初始化表情管理器
-        get_emoji_manager().initialize()
-        logger.info("表情包管理器初始化成功")
-
-        """
-        # 初始化回复后关系追踪系统
-        try:
-            from src.plugins.built_in.affinity_flow_chatter.interest_scoring import chatter_interest_scoring_system
-            from src.plugins.built_in.affinity_flow_chatter.relationship_tracker import ChatterRelationshipTracker
-
-            relationship_tracker = ChatterRelationshipTracker(interest_scoring_system=chatter_interest_scoring_system)
-            chatter_interest_scoring_system.relationship_tracker = relationship_tracker
-            logger.info("回复后关系追踪系统初始化成功")
-        except Exception as e:
-            logger.error(f"回复后关系追踪系统初始化失败: {e}")
-            relationship_tracker = None
-        """
-
-        # 启动情绪管理器
-        await mood_manager.start()
+@@ -249,15 +259,16 @@ MoFox_Bot(第三方修改版)
         logger.info("情绪管理器初始化成功")
 
         # 初始化聊天管理器
+
         await get_chat_manager()._initialize()
         asyncio.create_task(get_chat_manager()._auto_save_task())
+
         logger.info("聊天管理器初始化成功")
 
-        # 初始化增强记忆系统
-        await self.memory_manager.initialize()
-        logger.info("增强记忆系统初始化成功")
-
-        # 老记忆系统已完全删除
-
-        # 初始化消息兴趣值计算组件
-        await self._initialize_interest_calculator()
+        # 初始化记忆系统
+        await self.hippocampus_manager.initialize_async()
+        logger.info("记忆系统初始化成功")
+        if global_config.memory.enable_memory:
+            await self.hippocampus_manager.initialize_async()
+            logger.info("记忆系统初始化成功")
+        else:
+            logger.info("记忆系统已禁用，跳过初始化")
 
         # 初始化LPMM知识库
         from src.chat.knowledge.knowledge_lib import initialize_lpmm_knowledge
 
-        initialize_lpmm_knowledge()
-        logger.info("LPMM知识库初始化成功")
+@@ -266,21 +277,20 @@ MoFox_Bot(第三方修改版)
 
-        # 异步记忆管理器已禁用，增强记忆系统有内置的优化机制
-        logger.info("异步记忆管理器已禁用 - 使用增强记忆系统内置优化")
+        # 初始化异步记忆管理器
+        try:
+            from src.chat.memory_system.async_memory_optimizer import async_memory_manager
+
+            await async_memory_manager.initialize()
+            logger.info("记忆管理器初始化成功")
+            if global_config.memory.enable_memory:
+                from src.chat.memory_system.async_memory_optimizer import async_memory_manager
+                await async_memory_manager.initialize()
+                logger.info("记忆管理器初始化成功")
+            else:
+                logger.info("记忆管理器已禁用，跳过初始化")
+        except Exception as e:
+            logger.error(f"记忆管理器初始化失败: {e}")
 
         # await asyncio.sleep(0.5) #防止logger输出飞了
 
         # 将bot.py中的chat_bot.message_process消息处理函数注册到api.py的消息处理基类中
-        self.app.register_message_handler(self._message_process_wrapper)
+        self.app.register_message_handler(chat_bot.message_process)
 
         # 启动消息重组器的清理任务
         from src.utils.message_chunker import reassembler
@@ -396,121 +246,117 @@ MoFox_Bot(第三方修改版)
         await reassembler.start_cleanup_task()
         logger.info("消息重组器已启动")
 
-        # 启动消息管理器
-        from src.chat.message_manager import message_manager
 
-        await message_manager.start()
-        logger.info("消息管理器已启动")
 
-        # 初始化个体特征
-        await self.individuality.initialize()
+@@ -319,14 +329,15 @@ MoFox_Bot(第三方修改版)
+                self.server.run(),
+            ]
 
-        # 初始化月度计划管理器
-        if global_config.planning_system.monthly_plan_enable:
-            logger.info("正在初始化月度计划管理器...")
-            try:
-                await monthly_plan_manager.start_monthly_plan_generation()
-                logger.info("月度计划管理器初始化成功")
-            except Exception as e:
-                logger.error(f"月度计划管理器初始化失败: {e}")
-
-        # 初始化日程管理器
-        if global_config.planning_system.schedule_enable:
-            logger.info("日程表功能已启用，正在初始化管理器...")
-            await schedule_manager.load_or_generate_today_schedule()
-            await schedule_manager.start_daily_schedule_generation()
-            logger.info("日程表管理器初始化成功。")
-
-        try:
-            await event_manager.trigger_event(EventType.ON_START, permission_group="SYSTEM")
-            init_time = int(1000 * (time.time() - init_start_time))
-            logger.info(f"初始化完成，神经元放电{init_time}次")
-        except Exception as e:
-            logger.error(f"启动大脑和外部世界失败: {e}")
-            raise
-
-    async def schedule_tasks(self):
-        """调度定时任务"""
-        try:
-            while True:
-                try:
-                    tasks = [
-                        get_emoji_manager().start_periodic_check_register(),
-                        self.app.run(),
-                        self.server.run(),
+            # 添加记忆系统相关任务
+            tasks.extend(
+                [
+                    self.build_memory_task(),
+                    self.forget_memory_task(),
+                    self.consolidate_memory_task(),
+                ]
+            )
+            # 添加记忆系统相关任务（仅在启用时）
+            if global_config.memory.enable_memory:
+                tasks.extend(
+                    [
+                        self.build_memory_task(),
+                        self.forget_memory_task(),
+                        self.consolidate_memory_task(),
                     ]
+                )
 
-                    # 增强记忆系统不需要定时任务，已禁用原有记忆系统的定时任务
-                    # 使用 return_exceptions=True 防止单个任务失败导致整个程序崩溃
-                    await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*tasks)
 
-                except (ConnectionResetError, OSError) as e:
-                    logger.warning(f"网络连接发生错误，尝试重新启动任务: {e}")
-                    await asyncio.sleep(1)  # 短暂等待后重新开始
+
+@@ -334,65 +345,51 @@ MoFox_Bot(第三方修改版)
+        """记忆构建任务"""
+        while True:
+            await asyncio.sleep(global_config.memory.memory_build_interval)
+
+            
+            try:
+                # 检查记忆功能是否启用
+                if not global_config.memory.enable_memory:
                     continue
-                except asyncio.InvalidStateError as e:
-                    logger.error(f"异步任务状态无效，重新初始化: {e}")
-                    await asyncio.sleep(2)  # 等待更长时间让系统稳定
-                    continue
-                except Exception as e:
-                    logger.error(f"调度任务发生未预期异常: {e}")
-                    logger.error(traceback.format_exc())
-                    await asyncio.sleep(5)  # 发生其他错误时等待更长时间
-                    continue
+                    
+                # 使用异步记忆管理器进行非阻塞记忆构建
+                from src.chat.memory_system.async_memory_optimizer import build_memory_nonblocking
 
-        except asyncio.CancelledError:
-            logger.info("调度任务被取消，正在退出...")
-        except Exception as e:
-            logger.error(f"调度任务发生致命异常: {e}")
-            logger.error(traceback.format_exc())
-            raise
+                logger.info("正在启动记忆构建")
 
-    async def shutdown(self):
-        """关闭系统组件"""
-        logger.info("正在关闭MainSystem...")
+                # 定义构建完成的回调函数
+                def build_completed(result):
+                    if result:
+                        logger.info("记忆构建完成")
+                    else:
+                        logger.warning("记忆构建失败")
 
-        # 关闭表情管理器
-        try:
-            get_emoji_manager().shutdown()
-            logger.info("表情管理器已关闭")
-        except Exception as e:
-            logger.warning(f"关闭表情管理器时出错: {e}")
+                # 启动异步构建，不等待完成
+                
+                # 启动异步构建
+                task_id = await build_memory_nonblocking()
+                logger.info(f"记忆构建任务已提交：{task_id}")
 
-        # 关闭服务器
-        try:
-            if self.server:
-                await self.server.shutdown()
-                logger.info("服务器已关闭")
-        except Exception as e:
-            logger.warning(f"关闭服务器时出错: {e}")
-
-        # 关闭应用 (MessageServer可能没有shutdown方法)
-        try:
-            if self.app:
-                if hasattr(self.app, "shutdown"):
-                    await self.app.shutdown()
-                    logger.info("应用已关闭")
-                elif hasattr(self.app, "stop"):
-                    await self.app.stop()
-                    logger.info("应用已停止")
+                if task_id:
+                    logger.info(f"记忆构建任务已提交：{task_id}")
                 else:
-                    logger.info("应用没有shutdown方法，跳过关闭")
-        except Exception as e:
-            logger.warning(f"关闭应用时出错: {e}")
+                    logger.warning("记忆构建任务提交失败")
+                    
+            except ImportError:
+                # 如果异步优化器不可用，使用原有的同步方式（但在单独的线程中运行）
+                logger.warning("记忆优化器不可用，使用线性运行执行记忆构建")
 
-        logger.info("MainSystem关闭完成")
+                def sync_build_memory():
+                    """在线程池中执行同步记忆构建"""
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        result = loop.run_until_complete(self.hippocampus_manager.build_memory())
+                        logger.info("记忆构建完成")
+                        return result
+                    except Exception as e:
+                        logger.error(f"记忆构建失败: {e}")
+                        return None
+                    finally:
+                        loop.close()
 
-    # 老记忆系统的定时任务已删除 - 增强记忆系统使用内置的维护机制
+                # 在线程池中执行记忆构建
+                asyncio.get_event_loop().run_in_executor(None, sync_build_memory)
 
+                logger.warning("记忆优化器不可用，跳过记忆构建")
+            except Exception as e:
+                logger.error(f"记忆构建任务启动失败: {e}")
+                # fallback到原有的同步方式
+                logger.info("正在进行记忆构建（同步模式）")
+                await self.hippocampus_manager.build_memory()  # type: ignore
 
-async def main():
-    """主函数"""
-    system = MainSystem()
-    await asyncio.gather(
-        system.initialize(),
-        system.schedule_tasks(),
-    )
+    async def forget_memory_task(self):
+        """记忆遗忘任务"""
+        while True:
+            await asyncio.sleep(global_config.memory.forget_memory_interval)
+            # 检查记忆功能是否启用
+            if not global_config.memory.enable_memory:
+                continue
+                
+            logger.info("[记忆遗忘] 开始遗忘记忆...")
+            await self.hippocampus_manager.forget_memory(percentage=global_config.memory.memory_forget_percentage)  # type: ignore
+            await self.hippocampus_manager.forget_memory(percentage=global_config.memory.memory_forget_percentage)
+            logger.info("[记忆遗忘] 记忆遗忘完成")
 
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    async def consolidate_memory_task(self):
+        """记忆整合任务"""
+        while True:
+            await asyncio.sleep(global_config.memory.consolidate_memory_interval)
+            # 检查记忆功能是否启用
+            if not global_config.memory.enable_memory:
+                continue
+                
+            logger.info("[记忆整合] 开始整合记忆...")
+            await self.hippocampus_manager.consolidate_memory()  # type: ignore
+            await self.hippocampus_manager.consolidate_memory()
+            logger.info("[记忆整合] 记忆整合完成")
