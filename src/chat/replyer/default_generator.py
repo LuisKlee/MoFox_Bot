@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Any
 
 from src.chat.express.expression_selector import expression_selector
-from src.chat.message_receive.chat_stream import ChatStream
+from src.chat.message_receive.chat_stream import ChatStream, get_chat_manager
 from src.chat.message_receive.message import MessageRecv, MessageSending, Seg, UserInfo
 from src.chat.message_receive.uni_message_sender import HeartFCSender
 from src.chat.utils.chat_message_builder import (
@@ -299,7 +299,7 @@ class DefaultReplyer:
                 result = await event_manager.trigger_event(
                     EventType.POST_LLM, permission_group="SYSTEM", prompt=prompt, stream_id=stream_id
                 )
-                if not result.all_continue_process():
+                if result and not result.all_continue_process():
                     raise UserWarning(f"插件{result.get_summary().get('stopped_handlers', '')}于请求前中断了内容生成")
 
             # 4. 调用 LLM 生成回复
@@ -326,7 +326,7 @@ class DefaultReplyer:
                         llm_response=llm_response,
                         stream_id=stream_id,
                     )
-                    if not result.all_continue_process():
+                    if result and not result.all_continue_process():
                         raise UserWarning(
                             f"插件{result.get_summary().get('stopped_handlers', '')}于请求后取消了内容生成"
                         )
@@ -899,7 +899,7 @@ class DefaultReplyer:
                         # 处理消息内容中的用户引用，确保bot回复在消息内容中也正确显示
                         from src.chat.utils.chat_message_builder import replace_user_references_sync
                         msg_content = replace_user_references_sync(
-                            msg_content,
+                            msg_content or "",
                             platform,
                             replace_bot_name=True
                         )
@@ -1158,8 +1158,8 @@ class DefaultReplyer:
                 await person_info_manager.first_knowing_some_one(
                     platform,  # type: ignore
                     reply_message.get("user_id"),  # type: ignore
-                    reply_message.get("user_nickname"),
-                    reply_message.get("user_cardname"),
+                    reply_message.get("user_nickname") or "",
+                    reply_message.get("user_cardname") or "",
                 )
 
             # 检查是否是bot自己的名字，如果是则替换为"(你)"
@@ -1248,7 +1248,7 @@ class DefaultReplyer:
             ),
             "cross_context": asyncio.create_task(
                 self._time_and_run_task(
-                    Prompt.build_cross_context(chat_id, global_config.personality.prompt_mode, target_user_info),
+                    self.build_full_cross_context(chat_id, target_user_info),
                     "cross_context",
                 )
             ),
@@ -1431,6 +1431,12 @@ class DefaultReplyer:
             template_name = "default_expressor_prompt"
 
         # 获取模板内容
+        if not template_name:
+            logger.error("无法根据prompt_mode确定模板名称，请检查配置。")
+            return ""
+        if not template_name:
+            logger.error("无法根据prompt_mode确定模板名称，请检查配置。")
+            return ""
         template_prompt = await global_prompt_manager.get_prompt_async(template_name)
         prompt = Prompt(template=template_prompt.template, parameters=prompt_parameters)
         prompt_text = await prompt.build()
@@ -1442,13 +1448,13 @@ class DefaultReplyer:
 你的任务是将回复分割成多段发送，以模仿人类自然、富有节奏感的聊天方式。
 
 **核心指导**:
-1.  **硬性长度限制**: **除非是特别特别必要、必须作为完整长文本才能表达的情况（例如代码、故事），否则每一段由`[SPLIT]`分割的文字绝对不要超过40个字**。
-2.  **长度建议**: 在遵守上一条规则的前提下，为了保持对话的轻快节奏，**建议**将每段回复的长度控制在**20字左右**。
-3.  **逻辑转折点**: 在遇到转折、递进或举例的词语时（例如：“但是”、“而且”、“所以”、“比如”、“如果”），是绝佳的分段点。
+1.  **分段标志**: **强烈推荐在自然的标点符号（如句号、逗号、问号等）后进行分段**。这通常是最好的分段点。
+2.  **逻辑转折点**: 在遇到转折、递进或举例的词语时（例如：“但是”、“而且”、“所以”、“比如”、“如果”），也是很好的分段时机。
+3.  **格式完整性**: **唯一的例外是为了保持特定格式的完整性（例如代码块、格式化列表等），此时可以不分段**。
 4.  **标点处理**: `[SPLIT]` 标记本身就代表了停顿，所以在插入它的位置，请确保删除了前面的逗号、句号等标点符号。
 
 **任务**:
-请严格遵守以上指导，像一个真正在聊天的朋友一样，自然地决定在哪里插入 `[SPLIT]` 标记以进行分段。
+请基于以上指导，像一个真正在聊天的朋友一样，自然地决定在哪里插入 `[SPLIT]` 标记以进行分段。
 """
             # 将分段指令添加到提示词顶部
             prompt_text = f"{split_instruction}\n{prompt_text}"
@@ -1874,6 +1880,57 @@ class DefaultReplyer:
 
         except Exception as e:
             logger.error(f"存储聊天记忆失败: {e}")
+
+    async def build_full_cross_context(self, chat_id: str, target_user_info: dict[str, Any] | None) -> str:
+        """
+        构建完整的跨上下文信息，包括固定共享组和用户中心检索。
+        """
+        # 1. 处理固定的共享组
+        from src.chat.utils.prompt import Prompt
+        cross_context_block = await Prompt.build_cross_context(
+            chat_id, global_config.personality.prompt_mode, target_user_info
+        )
+
+        # 2. 处理用户中心检索
+        config = global_config.cross_context
+        if config.enable and config.user_centric_retrieval_mode != "disabled":
+            chat_manager = get_chat_manager()
+            current_stream = await chat_manager.get_stream(chat_id)
+            if not current_stream:
+                return cross_context_block
+
+            # 检查黑白名单
+            is_group = current_stream.group_info is not None
+            raw_id = None
+            if is_group and current_stream.group_info:
+                raw_id = current_stream.group_info.group_id
+            elif not is_group and current_stream.user_info:
+                raw_id = current_stream.user_info.user_id
+
+            if not raw_id:
+                 return cross_context_block
+            chat_type = "group" if is_group else "private"
+            
+            allow_retrieval = False
+            if config.user_centric_retrieval_mode == "all":
+                if [chat_type, str(raw_id)] not in config.blacklist_chats:
+                    allow_retrieval = True
+            elif config.user_centric_retrieval_mode == "whitelist":
+                if [chat_type, str(raw_id)] in config.whitelist_chats:
+                    allow_retrieval = True
+
+            if allow_retrieval and target_user_info and "user_id" in target_user_info:
+                from src.plugin_system.apis.cross_context_api import get_user_centric_context
+                user_centric_context = await get_user_centric_context(
+                    user_id=str(target_user_info["user_id"]),
+                    platform=current_stream.platform,
+                    limit=config.user_centric_retrieval_limit,
+                    exclude_chat_id=chat_id,
+                )
+                if user_centric_context:
+                    cross_context_block = f"{cross_context_block}\n{user_centric_context}"
+
+        return cross_context_block
 
 
 def weighted_sample_no_replacement(items, weights, k) -> list:

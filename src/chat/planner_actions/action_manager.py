@@ -248,6 +248,7 @@ class ChatterActionManager:
             else:
                 # 生成回复
                 try:
+                    chat_stream.context_manager.context.is_replying = True
                     success, response_set, _ = await generator_api.generate_reply(
                         chat_stream=chat_stream,
                         reply_message=target_message,
@@ -265,6 +266,8 @@ class ChatterActionManager:
                 except asyncio.CancelledError:
                     logger.debug(f"{log_prefix} 并行执行：回复生成任务已被取消")
                     return {"action_type": "reply", "success": False, "reply_text": "", "loop_info": None}
+                finally:
+                    chat_stream.context_manager.context.is_replying = False
 
                 # 发送并存储回复
                 loop_info, reply_text, cycle_timers_reply = await self._send_and_store_reply(
@@ -345,10 +348,10 @@ class ChatterActionManager:
                 context = chat_stream.context_manager
                 if context.context.interruption_count > 0:
                     old_count = context.context.interruption_count
-                    old_afc_adjustment = context.context.get_afc_threshold_adjustment()
+                    # old_afc_adjustment = context.context.get_afc_threshold_adjustment()
                     await context.context.reset_interruption_count()
                     logger.debug(
-                        f"动作执行成功，重置聊天流 {stream_id} 的打断计数: {old_count} -> 0, afc调整: {old_afc_adjustment} -> 0"
+                        f"动作执行成功，重置聊天流 {stream_id} 的打断计数: {old_count} -> 0"
                     )
         except Exception as e:
             logger.warning(f"重置打断计数时出错: {e}")
